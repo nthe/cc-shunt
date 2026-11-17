@@ -1,0 +1,12 @@
+{
+  "name": "cc-shunt",
+  "version": "0.7.0",
+  "description": "Multi-harness Scout and code-writer agents.",
+  "type": "module",
+  "main": "./adapters/opencode/shunt.js",
+  "license": "Apache-2.0",
+  "pi": {
+    "extensions": ["./adapters/pi/index.ts"],
+    "skills": ["./skills"]
+  }
+}

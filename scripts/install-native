@@ -1,0 +1,139 @@
+#!/usr/bin/env bash
+set -euo pipefail
+root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
+fail() { printf 'Error: %s\n' "$*" >&2; exit 1; }
+usage() { printf '%s\n' 'install-native claude|codex|copilot|pi|opencode [--project DIR] [--model ID] [--no-hooks]'; }
+if [[ ${1:-} == --help || ${1:-} == -h ]]; then usage; exit 0; fi
+harness=${1:-}
+(($#)) || { usage >&2; exit 1; }
+shift
+project=$PWD model='' hooks=1
+while (($#)); do
+  case $1 in
+    --project|--model)
+      (($# >= 2)) && [[ -n $2 && $2 != --* ]] || fail "missing value for $1"
+      case $1 in --project) project=$2 ;; --model) model=$2 ;; esac
+      shift 2 ;;
+    --no-hooks) hooks=0; shift ;;
+    *) fail "unknown argument: $1" ;;
+  esac
+done
+case $harness in
+  claude) scope=.claude; model=${model:-haiku} ;;
+  codex) scope=.codex; model=${model:-gpt-6-luna} ;;
+  copilot) scope=.github ;;
+  pi) scope=.pi ;;
+  opencode) scope=.opencode ;;
+  *) fail "unsupported harness: $harness" ;;
+esac
+[[ -n $model ]] || fail "supply --model with a worker model available in $harness"
+command -v jq >/dev/null 2>&1 || fail 'jq is required'
+# JSON basic strings are also valid TOML and YAML quoted strings.
+model_json=$(jq -cn --arg value "$model" '$value')
+mkdir -p -- "$project"
+project=$(cd "$project" && pwd -P)
+skill_scope=$scope
+[[ $harness != codex ]] || skill_scope=.agents
+artifacts=("$project/$skill_scope/skills/bulk-reader" "$project/$skill_scope/skills/code-writer")
+artifacts+=("$project/$skill_scope/skills/scout")
+case $harness in
+  claude) artifacts+=("$project/$scope/agents/bulk-reader.md" "$project/$scope/agents/code-writer.md" "$project/$scope/agents/scout.md") ;;
+  codex) artifacts+=("$project/$scope/agents/bulk-reader.toml" "$project/$scope/agents/code-writer.toml" "$project/$scope/agents/scout.toml") ;;
+  copilot) artifacts+=("$project/$scope/agents/bulk-reader.agent.md" "$project/$scope/agents/code-writer.agent.md" "$project/$scope/agents/scout.agent.md") ;;
+  opencode)
+    artifacts+=("$project/$scope/agents/bulk-reader.md" "$project/$scope/agents/code-writer.md")
+    artifacts+=("$project/$scope/agents/scout.md")
+    if ((hooks)); then artifacts+=("$project/$scope/plugins/shunt.js"); fi ;;
+  pi) artifacts+=("$project/$scope/extensions/shunt" "$project/$scope/shunt.json") ;;
+esac
+for file in "${artifacts[@]}"; do
+  [[ ! -e $file && ! -L $file ]] || fail "installation path exists: $file"
+done
+created=()
+rollback() {
+  local status=$?
+  if ((status)); then
+    for file in "${created[@]}"; do rm -rf -- "$file"; done
+  fi
+}
+trap rollback EXIT
+for name in scout bulk-reader code-writer; do
+  folder=$project/$skill_scope/skills/$name
+  mkdir -p -- "$(dirname "$folder")"
+  mkdir -- "$folder"
+  created+=("$folder")
+  cp "$root/skills/$name/SKILL.md" "$folder/SKILL.md"
+  ln -s "$root/scripts" "$folder/scripts"
+done
+for name in scout bulk-reader code-writer; do
+  [[ $harness != pi ]] || break
+  prompt=$root/prompts/$name.md
+  body=$(printf 'Read and follow %s.\nRead supplied files with %s.\nDo not delegate or call another model.\n' \
+    "$(jq -rn --arg value "$prompt" '$value|@json')" \
+    "$(jq -rn --arg value "$root/scripts/read-files" '$value|@json')")
+  if [[ $name == scout ]]; then
+    description='Complete read-only source tasks from starting paths. Discover related files and return exact file:line evidence.'
+    body=$(printf 'Read and follow %s.\nRequire paths and task. Follow related source within the project. Use native read and search tools. Do not modify files, run project code, or delegate. Return one final cited answer, at most 500 words.\n' "$(jq -rn --arg value "$prompt" '$value|@json')")
+  elif [[ $name == bulk-reader ]]; then
+    description='Read large files and return a complete short answer with exact file:line evidence.'
+    body+=$'\nUse read-files for numbered content; --lines START:END selects a source section. Use read-only search tools, rg --files, or rg -n to locate related project files. Use shell tools only for these reads and searches. Do not modify files or run project code. Return one final answer, not progress messages or file contents.'
+  else
+    description='Generate one routine code file from a spec and references. Return target status.'
+    body+=$(printf '\nWrite targets with %s and code on stdin. Use --overwrite only when the parent explicitly requests replacement.' "$(jq -rn --arg value "$root/scripts/write-code" '$value|@json')")
+    body+=$'\nUse shell tools only for these helpers and temporary code files. Do not execute generated code.'
+  fi
+  case $harness in
+    codex)
+      if [[ $name == scout ]]; then
+        body+=$(printf '\nUse %s for numbered source reads and rg for discovery. The helper avoids parent read routing when the harness omits worker identity.' "$(jq -rn --arg value "$root/scripts/read-files" '$value|@json')")
+      fi
+      file=$project/$scope/agents/$name.toml
+      content=$(printf 'name = "%s"\ndescription = %s\nmodel = %s\nmodel_reasoning_effort = "high"\ndeveloper_instructions = %s\n' "$name" \
+        "$(jq -cn --arg value "$description" '$value')" "$model_json" "$(jq -cn --arg value "$body" '$value')") ;;
+    *)
+      suffix=.md
+      [[ $harness != copilot ]] || suffix=.agent.md
+      file=$project/$scope/agents/$name$suffix
+      content=$(printf -- '---\nname: %s\ndescription: %s\nmodel: %s\n' "$name" "$description" "$model_json")
+      case $harness in
+        claude)
+          if [[ $name == scout ]]; then content+=$'\ntools: Read, Grep, Glob'
+          elif [[ $name == bulk-reader ]]; then content+=$'\ntools: Read, Grep, Glob, Bash'
+          else content+=$'\ntools: Read, Bash'; fi
+          content+=$'\nmaxTurns: 12' ;;
+        copilot) content+=$'\nmodelPolicy: required\ntools: ["read", "execute"]\nstrict-tools-list: true\ninclude-custom-instructions: true' ;;
+        opencode) content+=$'\nmode: subagent\npermission:\n  edit: deny\n  task: deny' ;;
+      esac
+      content+=$'\n---\n\n'
+      content+=$body ;;
+  esac
+  mkdir -p -- "$(dirname "$file")"
+  (set -C; printf '%s\n' "$content" > "$file")
+  created+=("$file")
+done
+case $harness in
+  pi)
+    file=$project/$scope/shunt.json
+    (set -C; jq -n --arg root "$root" --arg model "$model" --argjson hooks "$hooks" '{root:$root,model:$model,hooks:($hooks == 1)}' > "$file")
+    created+=("$file")
+    file=$project/$scope/extensions/shunt
+    mkdir -p -- "$(dirname "$file")"
+    ln -s "$root/adapters/pi" "$file"
+    created+=("$file") ;;
+  opencode)
+    if ((hooks)); then
+      file=$project/$scope/plugins/shunt.js
+      mkdir -p -- "$(dirname "$file")"
+      ln -s "$root/adapters/opencode/shunt.js" "$file"
+      created+=("$file")
+    fi ;;
+esac
+if ((hooks)); then
+  case $harness in
+    claude|codex) "$root/scripts/install-hooks" "$harness" --project "$project" ;;
+    copilot) "$root/scripts/install-hooks" "$harness" --project "$project" ;;
+  esac
+fi
+trap - EXIT
+printf 'Installed native Shunt agents for %s in %s (model: %s).\n' "$harness" "$project" "$model"
+printf '%s\n' 'Reload the harness. Keep the Shunt source folder in place.'

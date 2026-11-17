@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+set -o pipefail
+# shellcheck source-path=SCRIPTDIR
+# shellcheck source=lib/scout.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/scout.sh"
+shunt_scout "$@"

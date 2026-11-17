@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+set -euo pipefail
+root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
+fail() { printf 'Error: %s\n' "$*" >&2; exit 1; }
+usage() { printf '%s\n' 'install-codex-mcp --project DIR [--model ID]'; }
+if [[ ${1:-} == --help || ${1:-} == -h ]]; then usage; exit 0; fi
+project=$PWD model=gpt-6-luna
+while (($#)); do
+  case $1 in
+    --project|--model)
+      (($# >= 2)) && [[ -n $2 && $2 != --* ]] || fail "missing value for $1"
+      case $1 in --project) project=$2 ;; --model) model=$2 ;; esac
+      shift 2 ;;
+    *) fail "unknown argument: $1" ;;
+  esac
+done
+[[ -d $project ]] || fail "project directory does not exist: $project"
+project=$(cd "$project" && pwd -P)
+mkdir -p "$project/.codex"
+file=$project/.codex/config.toml
+[[ ! -L $file ]] || fail 'Codex config is a symbolic link'
+[[ ! -e $file || -f $file ]] || fail 'Codex config is not a regular file'
+if [[ -e $file ]] && grep -Fq 'shunt_reader' "$file"; then
+  fail 'shunt_reader already exists in Codex config'
+fi
+command -v jq >/dev/null 2>&1 || fail 'jq is required'
+args=$(jq -cn --arg script "$root/scripts/mcp-reader" --arg project "$project" --arg model "$model" \
+  '[$script,"--root",$project,"--backend","codex","--model",$model]')
+tmp=$(mktemp "$project/.codex/.shunt-config.XXXXXXXX")
+cleanup() { rm -f -- "$tmp"; }
+trap cleanup EXIT
+if [[ -e $file ]]; then
+  cat "$file" > "$tmp"
+  [[ ! -s $tmp ]] || printf '\n' >> "$tmp"
+fi
+{
+  printf '%s\n' '[mcp_servers.shunt_reader]' 'command = "bash"'
+  printf 'args = %s\n' "$args"
+  printf '%s\n' 'required = true' 'tool_timeout_sec = 240'
+} >> "$tmp"
+chmod 600 "$tmp"
+mv -f -- "$tmp" "$file"
+trap - EXIT
+printf 'Added shunt_reader to %s\n' "$file"
+printf '%s\n' 'Restart Codex. Review and trust the read hook with /hooks.'

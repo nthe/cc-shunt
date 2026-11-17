@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+set -euo pipefail
+# shellcheck source-path=SCRIPTDIR
+# shellcheck source=lib/tasks.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/tasks.sh"
+first=1 last=0
+if [[ ${1:-} == --help || ${1:-} == -h ]]; then
+  printf '%s\n' 'read-files [--lines START:END] [--] FILE...' 'Print validated UTF-8 files with source line numbers. The size limit applies to complete input files.'
+  exit 0
+fi
+if [[ ${1:-} == --lines ]]; then
+  (($# >= 2)) && [[ $2 =~ ^([0-9]{1,9}):([0-9]{1,9})$ ]] || {
+    shunt_error 'use --lines START:END with positive line numbers'; exit 1;
+  }
+  first=$((10#${BASH_REMATCH[1]})) last=$((10#${BASH_REMATCH[2]}))
+  ((first > 0 && last >= first)) || { shunt_error 'line range must start at 1 or more and end at or after its start'; exit 1; }
+  shift 2
+fi
+if [[ ${1:-} == -- ]]; then shift; fi
+(($#)) || { shunt_error 'supply one or more file paths'; exit 1; }
+# This helper reads files. It does not start a model.
+SHUNT_ACTIVE='' shunt_settings
+# Buffer all files so validation errors cannot emit partial content.
+message=$(shunt_files numbered "$first" "$last" "$@")
+printf '%s\n\n' "$message"

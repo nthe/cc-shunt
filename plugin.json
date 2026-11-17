@@ -1,0 +1,13 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "cc-shunt",
+  "version": "0.7.0",
+  "description": "Route broad source reads to a configured Scout worker.",
+  "license": "Apache-2.0",
+  "keywords": ["agents", "scout", "delegation", "cost"],
+  "extensions": {
+    "com.openai": {
+      "hooks": "./hooks/hooks.json"
+    }
+  }
+}

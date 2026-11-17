@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+set -euo pipefail
+mode=${SHUNT_TASK_MODE:-bulk}
+cat > "$RECORD/prompt-$mode"
+printf '%s\n' "$mode" >> "$RECORD/calls"
+case $mode in
+  scout) text=${SCOUT_ANSWER:-'SHUNT_COVERAGE: complete'} ;;
+  *) text=${BULK_ANSWER:-'SHUNT_COVERAGE: complete'} ;;
+esac
+while (($#)); do
+  case $1 in
+    --output-last-message) printf '%s\n' "$text" > "$2"; exit 0 ;;
+    --output-format) jq -n --arg result "$text" '{result:$result,is_error:false}'; exit 0 ;;
+  esac
+  shift
+done
+printf '%s\n' "$text"

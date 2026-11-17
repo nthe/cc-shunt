@@ -1,0 +1,78 @@
+#!/usr/bin/env bash
+set -euo pipefail
+root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
+fail() { printf 'Error: %s\n' "$*" >&2; exit 1; }
+usage() { printf '%s\n' 'install-hooks claude|codex|copilot [--project DIR] [--auto-scout --backend claude|codex|command [--model ID]]'; }
+if [[ ${1:-} == --help || ${1:-} == -h ]]; then usage; exit 0; fi
+harness=${1:-}
+(($#)) || { usage >&2; exit 1; }
+shift
+project=$PWD auto_scout=0 backend='' model=''
+while (($#)); do
+  case $1 in
+    --project) (($# >= 2)) && [[ -n $2 && $2 != --* ]] || fail 'missing --project value'; project=$2; shift 2 ;;
+    --backend|--model)
+      (($# >= 2)) && [[ -n $2 && $2 != --* ]] || fail "missing $1 value"
+      case $1 in --backend) backend=$2 ;; --model) model=$2 ;; esac
+      shift 2 ;;
+    --auto-scout) auto_scout=1; shift ;;
+    *) fail "unknown argument: $1" ;;
+  esac
+done
+if ((auto_scout)); then
+  case $backend in claude|codex|command) ;; *) fail 'automatic Scout needs --backend claude, codex, or command' ;; esac
+  [[ $harness != copilot ]] || fail 'automatic Scout needs transcript context, which Copilot PreToolUse does not provide'
+  [[ $backend != codex || -n $model ]] || fail 'Codex automatic Scout needs --model'
+fi
+case $harness in
+  claude) relative=.claude/settings.json; event=PreToolUse ;;
+  codex) relative=.codex/hooks.json; event=PreToolUse ;;
+  copilot) relative=.github/hooks/shunt.json; event=preToolUse ;;
+  *) fail "unsupported harness: $harness" ;;
+esac
+command -v jq >/dev/null 2>&1 || fail 'jq is required'
+mkdir -p -- "$project"
+project=$(cd "$project" && pwd -P)
+file=$project/$relative
+[[ ! -L $file ]] || fail "hook config is a symbolic link: $file"
+mkdir -p -- "$(dirname "$file")"
+existing='{}'
+if [[ -e $file ]]; then existing=$(cat "$file"); fi
+# Preserve other hooks and settings. Repeated installation adds no duplicate entry.
+printf -v command 'bash %q %q' "$root/scripts/check-large-read.sh" "$harness"
+if ((auto_scout)); then
+  command+=' --auto-scout'
+  printf -v option ' --backend %q' "$backend"
+  command+=$option
+  if [[ -n $model ]]; then
+    printf -v option ' --model %q' "$model"
+    command+=$option
+  fi
+fi
+if [[ $harness == copilot ]]; then
+  entry=$(jq -n --arg command "$command" '{type: "command", bash: $command, timeoutSec: 10}')
+else
+  if ((auto_scout)); then timeout=240; status='Shunt: Scout is reading'
+  else timeout=10; status='Shunt: check read size'; fi
+  entry=$(jq -n --arg command "$command" --arg status "$status" --argjson timeout "$timeout" '{matcher: "Read|read_file|view|Bash|bash|exec_command|shell_command", hooks: [{type: "command", command: $command, timeout: $timeout, statusMessage: $status}]}')
+fi
+staged=$(mktemp "$(dirname "$file")/.shunt-hooks.XXXXXXXX")
+trap 'rm -f -- "$staged"' EXIT
+jq -es --arg event "$event" --argjson entry "$entry" --arg harness "$harness" '
+  if length == 1 then .[0] else error("hook configuration must contain one JSON object") end |
+  if type != "object" or (.hooks != null and (.hooks | type) != "object")
+     or (.hooks[$event] != null and (.hooks[$event] | type) != "array")
+  then error("invalid existing hook configuration") else . end |
+  if $harness == "copilot" then
+    if .version != null and .version != 1 then error("unsupported hook version") else .version = 1 end
+  else . end |
+  .hooks[$event] = ((.hooks[$event] // []) |
+    # Update the previous Shunt entry that had no status message.
+    if $harness != "copilot" then
+      map(if . == ($entry | .hooks |= map(del(.statusMessage))) then $entry else . end)
+    else . end |
+    if index($entry) == null then . + [$entry] else . end)
+' <<< "$existing" > "$staged"
+mv -f -- "$staged" "$file"
+printf 'Installed hooks in %s\n' "$file"
+if [[ $harness == codex ]]; then printf '%s\n' 'In Codex, open /hooks and review and trust the new hook.'; fi

@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "hooks": {
+    "preToolUse": [
+      {
+        "type": "command",
+        "bash": "bash \"${PLUGIN_ROOT}/scripts/check-large-read.sh\" copilot",
+        "timeoutSec": 10
+      }
+    ]
+  }
+}

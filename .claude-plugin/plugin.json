@@ -1,0 +1,5 @@
+{
+  "name": "cc-shunt",
+  "version": "0.7.0",
+  "description": "Route broad source reads to Scout. Includes optional bulk-reader and code-writer agents."
+}

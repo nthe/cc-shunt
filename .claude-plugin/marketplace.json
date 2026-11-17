@@ -1,0 +1,20 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "shunt-tools",
+  "description": "CC Shunt plugins.",
+  "owner": { "name": "CC Shunt" },
+  "metadata": {
+    "description": "Multi-harness source delegation tools.",
+    "version": "0.7.0"
+  },
+  "plugins": [
+    {
+      "name": "cc-shunt",
+      "description": "Delegate broad source reads to Scout.",
+      "source": "./",
+      "version": "0.7.0",
+      "category": "development",
+      "strict": true
+    }
+  ]
+}

@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cat > "$RECORD/prompt"
+printf '%s\n' "$@" > "$RECORD/args"
+printf '%s\n' "$PWD" > "$RECORD/cwd"
+printf '%s\n' "${SHUNT_ACTIVE:-}" > "$RECORD/active"
+[[ -z ${FAIL:-} ]] || { printf 'worker error\n' >&2; exit 1; }
+if [[ -n ${WAIT:-} ]]; then
+  sleep 10 &
+  printf '%s\n' "$!" > "$RECORD/child"
+  wait
+fi
+text=${ANSWER-short answer}
+while (($#)); do
+  case $1 in
+    --output-last-message) printf '%s\n' "$text" > "$2"; printf 'progress that must not reach parent\n'; exit 0 ;;
+    --output-format) jq -n --arg result "$text" --arg error "${JSON_ERROR:-}" '{result: $result, is_error: ($error != "")}'; exit 0 ;;
+  esac
+  shift
+done
+printf '%s\n' "$text"

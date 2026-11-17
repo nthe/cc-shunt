@@ -1,0 +1,16 @@
+{
+  "name": "shunt-tools",
+  "owner": { "name": "CC Shunt" },
+  "metadata": {
+    "description": "Multi-harness source delegation tools.",
+    "version": "0.7.0"
+  },
+  "plugins": [
+    {
+      "name": "cc-shunt",
+      "description": "Delegate broad source reads to Scout.",
+      "version": "0.7.0",
+      "source": "./"
+    }
+  ]
+}

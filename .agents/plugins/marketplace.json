@@ -1,0 +1,12 @@
+{
+  "name": "shunt-tools",
+  "interface": { "displayName": "Shunt Tools" },
+  "plugins": [
+    {
+      "name": "cc-shunt",
+      "source": { "source": "local", "path": "./" },
+      "policy": { "installation": "AVAILABLE", "authentication": "ON_INSTALL" },
+      "category": "Productivity"
+    }
+  ]
+}

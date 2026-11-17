@@ -1,0 +1,202 @@
+#!/usr/bin/env bash
+set -uo pipefail
+# Keep waits inside the tool process. Reuse the CLI reader and its worker limits.
+# shellcheck source-path=SCRIPTDIR
+# shellcheck source=lib/tasks.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/tasks.sh"
+# shellcheck source-path=SCRIPTDIR
+# shellcheck source=lib/scout.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/scout.sh"
+physical_dir() {
+  local marked
+  marked=$(cd -P -- "$1" && printf '%s.' "$PWD") || return 1
+  physical=${marked%.}
+}
+backend=${SHUNT_BACKEND:-claude} model=${SHUNT_MODEL:-} project='' scout_only=0
+while (($#)); do
+  case $1 in
+    --root|--backend|--model)
+      (($# >= 2)) && [[ -n $2 && $2 != --* ]] || { shunt_error "missing value for $1"; exit 1; }
+      case $1 in --root) project=$2 ;; --backend) backend=$2 ;; --model) model=$2 ;; esac
+      shift 2 ;;
+    --scout-only) scout_only=1; shift ;;
+    --help|-h) echo 'mcp-reader --root PROJECT [--backend claude|codex|command] [--model ID] [--scout-only]'; exit 0 ;;
+    *) shunt_error "unknown argument: $1"; exit 1 ;;
+  esac
+done
+[[ -n $project ]] || { shunt_error '--root is required'; exit 1; }
+physical_dir "$project" || exit 1
+project=$physical
+[[ $project != / ]] || { shunt_error 'use a project folder'; exit 1; }
+case $backend in
+  claude|command) ;;
+  codex) [[ -n $model ]] || { shunt_error 'supply a worker model'; exit 1; } ;;
+  *) shunt_error "unsupported backend: $backend"; exit 1 ;;
+esac
+shunt_settings || exit 1
+cd -- "$project" || exit 1
+umask 077
+mcp_work=$(mktemp -d "${TMPDIR:-/tmp}/shunt-mcp.XXXXXXXX") || exit 1
+mcp_work=$(cd "$mcp_work" && pwd -P) || exit 1
+active='' active_id=null initialized=0 input_pid=''
+stop_call() {
+  if [[ -n $active ]]; then
+    kill -TERM -- "-$active" 2>/dev/null || :
+    wait "$active" 2>/dev/null || :
+    active=''
+  fi
+  active_id=null
+  rm -f -- "$mcp_work/response" "$mcp_work/response.tmp" "$mcp_work/error" "$mcp_work/answer"
+}
+cleanup() {
+  stop_call
+  if [[ -n $input_pid ]]; then kill "$input_pid" 2>/dev/null || :; wait "$input_pid" 2>/dev/null || :; fi
+  rm -rf -- "$mcp_work"
+}
+trap cleanup EXIT
+trap 'exit 143' TERM HUP
+trap 'exit 130' INT
+rpc_error() {
+  jq -cn --argjson id "$id" --argjson code "$1" --arg message "$2" \
+    '{jsonrpc:"2.0",id:$id,error:{code:$code,message:$message}}'
+}
+rpc_result() {
+  jq -cn --argjson id "$id" --argjson result "$1" '{jsonrpc:"2.0",id:$id,result:$result}'
+}
+resolve_file() {
+  local path=$1 dir link i
+  [[ $path == /* ]] || path=$project/$path
+  if [[ ${scouting:-0} == 1 && -d $path ]]; then
+    physical_dir "$path" || return 1
+    [[ $physical == "$project" || $physical == "$project/"* ]] || return 1
+    resolved=$physical
+    return
+  fi
+  for ((i=0;i<40;i++)); do
+    dir=${path%/*}
+    physical_dir "${dir:-/}" || return 1
+    dir=$physical
+    path=$dir/${path##*/}
+    if [[ -L $path ]]; then
+      link=$(readlink -n -- "$path" && printf '.') || return 1
+      link=${link%.}
+      if [[ $link == /* ]]; then path=$link; else path=$dir/$link; fi
+    else
+      [[ $path == "$project/"* && -f $path && -r $path ]] || return 1
+      resolved=./${path#"$project/"}
+      return 0
+    fi
+  done
+  return 1
+}
+start_call() {
+  local path resolved question status scouting=0
+  local paths=()
+  [[ $(jq -r '.params.name' <<< "$request") != scout ]] || scouting=1
+  jq -e '
+    (if .params.name == "scout" then .params.arguments.task else .params.arguments.question end) as $task |
+    (.params.name == "bulk_read" or .params.name == "scout") and
+    (.params.arguments | type == "object" and
+      (keys - ["question","task","paths"] | length == 0) and
+      ($task | type == "string" and test("\\S") and (contains("\u0000") | not)) and
+      (.paths | type == "array" and length > 0 and length <= 256 and
+        all(.[]; type == "string" and length > 0 and (contains("\u0000") | not))))
+  ' <<< "$request" >/dev/null 2>&1 || { rpc_error -32602 'Invalid reader arguments.'; return; }
+  if ((scout_only && !scouting)); then rpc_error -32602 'Use scout with paths and task.'; return; fi
+  if ((scouting)); then
+    jq -e '.params.arguments | has("question") | not' <<< "$request" >/dev/null || { rpc_error -32602 'Scout requires task, not question.'; return; }
+  else
+    jq -e '.params.arguments | has("task") | not' <<< "$request" >/dev/null || { rpc_error -32602 'bulk_read requires question, not task.'; return; }
+  fi
+  while IFS= read -r -d '' path; do
+    resolve_file "$path" || { rpc_error -32602 'Files must be readable and inside the project.'; return; }
+    paths+=("$resolved")
+  done < <(jq -j '.params.arguments.paths[] | ., "\u0000"' <<< "$request")
+  question=$(jq -r '.params.arguments.task // .params.arguments.question' <<< "$request")
+  set -m
+  (
+    trap - EXIT
+    export SHUNT_MCP_ACTIVE=1
+    # shunt_main installs worker cancellation and cleanup traps in this subshell.
+    if ((scouting)); then
+      shunt_scout --root "$project" --backend "$backend" --model "$model" \
+        --task "$question" --paths "${paths[@]}" > "$mcp_work/answer" 2> "$mcp_work/error"
+    else
+      shunt_main bulk-read --backend "$backend" --model "$model" \
+        --question "$question" --paths "${paths[@]}" > "$mcp_work/answer" 2> "$mcp_work/error"
+    fi
+    status=$?
+    if ((status)); then tail -c 2000 "$mcp_work/error" > "$mcp_work/answer"; fi
+    jq -cn --argjson id "$id" --rawfile text "$mcp_work/answer" --argjson status "$status" \
+      '{jsonrpc:"2.0",id:$id,result:{content:[{type:"text",text:$text}],isError:($status != 0)}}' \
+      > "$mcp_work/response.tmp" && mv "$mcp_work/response.tmp" "$mcp_work/response"
+  ) &
+  active=$! active_id=$id
+  set +m
+}
+# A blocking reader preserves messages split across writes, including on Bash 3.
+exec 3<&0
+(
+  trap - EXIT
+  exec 0<&3 3<&-
+  sequence=0
+  while IFS= read -r part; do
+    printf '%s\n' "$part" > "$mcp_work/input.tmp"
+    mv "$mcp_work/input.tmp" "$mcp_work/input.$sequence"
+    sequence=$((sequence + 1))
+  done
+  : > "$mcp_work/input.closed"
+) &
+input_pid=$!
+exec 3<&-
+sequence=0
+while :; do
+  if [[ -n $active && -f $mcp_work/response ]]; then
+    cat "$mcp_work/response"
+    wait "$active" 2>/dev/null || :
+    active=''
+    stop_call
+  elif [[ -n $active ]] && ! kill -0 "$active" 2>/dev/null; then
+    id=$active_id
+    rpc_error -32603 'Reader process stopped without a result.'
+    stop_call
+  fi
+  if [[ ! -f $mcp_work/input.$sequence ]]; then
+    [[ ! -f $mcp_work/input.closed ]] || break
+    sleep 0.1
+    continue
+  fi
+  request=$(cat "$mcp_work/input.$sequence")
+  rm "$mcp_work/input.$sequence"
+  sequence=$((sequence + 1))
+  id=null
+  jq -se 'length == 1' <<< "$request" >/dev/null 2>&1 || { rpc_error -32700 'Invalid JSON.'; continue; }
+  jq -e 'type == "object" and .jsonrpc == "2.0" and (.method | type == "string") and
+    ((has("id") | not) or (.id | type == "string" or (type == "number" and floor == .))) and
+    ((has("params") | not) or (.params | type == "object"))' <<< "$request" >/dev/null 2>&1 || {
+      rpc_error -32600 'Invalid request.'; continue;
+    }
+  id=$(jq -c '.id // null' <<< "$request")
+  method=$(jq -r .method <<< "$request")
+  if [[ $id == null ]]; then
+    if [[ $method == notifications/cancelled && -n $active ]] && \
+      [[ $(jq -c '.params.requestId // null' <<< "$request") == "$active_id" ]]; then stop_call; fi
+    continue
+  fi
+  case $method in
+    initialize)
+      initialized=1
+      rpc_result '{"protocolVersion":"2025-03-26","capabilities":{"tools":{}},"serverInfo":{"name":"shunt-reader","version":"0.2.0"},"instructions":"Use scout for read-only source tasks. Use bulk_read for fixed-file extraction when listed. Both wait for the final worker answer. Do not poll or start a duplicate call."}' ;;
+    ping) rpc_result '{}' ;;
+    tools/list)
+      if ((initialized == 0)); then rpc_error -32600 'Initialize the server first.'; continue; fi
+      tools='{"tools":[{"name":"bulk_read","description":"Read selected project files with the configured worker. Supply the complete question. Waits for one final answer; no polling is required.","inputSchema":{"type":"object","properties":{"question":{"type":"string","minLength":1},"paths":{"type":"array","minItems":1,"maxItems":256,"items":{"type":"string","minLength":1}}},"required":["question","paths"],"additionalProperties":false},"annotations":{"readOnlyHint":true,"openWorldHint":true}},{"name":"scout","description":"Complete a read-only source task with the configured worker. Supply starting files or folders and the complete task. The worker discovers related source and returns one concise cited answer. Waits for completion; do not poll.","inputSchema":{"type":"object","properties":{"task":{"type":"string","minLength":1},"paths":{"type":"array","minItems":1,"maxItems":256,"items":{"type":"string","minLength":1}}},"required":["task","paths"],"additionalProperties":false},"annotations":{"readOnlyHint":true,"openWorldHint":true}}]}'
+      if ((scout_only)); then tools=$(jq -c '.tools |= map(select(.name == "scout"))' <<< "$tools"); fi
+      rpc_result "$tools" ;;
+    tools/call)
+      if ((initialized == 0)); then rpc_error -32600 'Initialize the server first.'
+      elif [[ -n $active ]]; then rpc_error -32000 'A reader call is already active.'
+      else start_call; fi ;;
+    *) rpc_error -32601 'Method not found.' ;;
+  esac
+done

@@ -1,0 +1,7 @@
+CC Shunt adapts the bulk-reader and code-writer flow and task prompts from:
+https://github.com/spotify/portal-ai-plugins/tree/main/plugins/shunt
+
+Upstream license: Apache License, Version 2.0. See LICENSE.
+Changes: Portal transport replaced with Bash harness commands; input validation,
+worker isolation, portable skill installation, and explicit file replacement added.
+This project is not an official Spotify plugin.

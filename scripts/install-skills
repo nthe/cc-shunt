@@ -1,0 +1,94 @@
+#!/usr/bin/env bash
+set -euo pipefail
+root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
+# Native agents are the default. An explicit backend selects the CLI fallback.
+use_native=1
+for argument in "$@"; do
+  case $argument in --backend|--help|-h) use_native=0 ;; esac
+done
+if ((use_native)); then exec "$root/scripts/install-native" "$@"; fi
+usage() {
+  printf '%s\n' 'install-skills claude|codex|copilot|pi|opencode [--project DIR] [--model ID] [--no-hooks]' 'Use --backend claude|codex|command to install CLI workers instead of native agents.'
+}
+fail() { printf 'Error: %s\n' "$*" >&2; exit 1; }
+if [[ ${1:-} == --help || ${1:-} == -h ]]; then usage; exit 0; fi
+harness=${1:-}
+(($#)) || { usage >&2; exit 1; }
+shift
+case $harness in
+  claude) location=.claude/skills; backend=claude ;;
+  codex) location=.agents/skills; backend=codex ;;
+  copilot) location=.github/skills; backend= ;;
+  pi) location=.pi/skills; backend= ;;
+  opencode) location=.opencode/skills; backend= ;;
+  *) fail "unsupported harness: $harness" ;;
+esac
+project=$PWD model='' install_hooks=1
+while (($#)); do
+  case $1 in
+    --project|--backend|--model)
+      (($# >= 2)) && [[ -n $2 && $2 != --* ]] || fail "missing value for $1"
+      case $1 in --project) project=$2 ;; --backend) backend=$2 ;; --model) model=$2 ;; esac
+      shift 2 ;;
+    --no-hooks) install_hooks=0; shift ;;
+    *) fail "unknown argument: $1" ;;
+  esac
+done
+case $backend in claude|command) ;; codex) [[ -n $model ]] || fail 'supply --model with a worker model ID available in Codex' ;; *) fail 'select --backend claude, codex, or command' ;; esac
+mkdir -p -- "$project"
+project=$(cd "$project" && pwd -P)
+destination=$project/$location
+# Validate both paths before linking. Do not replace existing installations.
+for name in scout bulk-reader code-writer; do
+  [[ ! -e $destination/$name && ! -L $destination/$name ]] || fail "skill already exists: $destination/$name"
+done
+created=()
+rollback() {
+  local status=$?
+  if ((status)); then
+    # These folders were created by this invocation. Existing skills are untouched.
+    for folder in "${created[@]}"; do rm -rf -- "$folder"; done
+  fi
+}
+for name in scout bulk-reader code-writer; do
+  folder=$destination/$name
+  mkdir -p -- "$destination"
+  mkdir -- "$folder"
+  created+=("$folder")
+  trap rollback EXIT
+  mkdir -- "$folder/scripts"
+  # Codex skips file symlinks during skill discovery. Keep the entry point real.
+  cp "$root/skills/$name/SKILL.md" "$folder/SKILL.md"
+  printf '\nThis installation selects the CLI fallback. Use the script above instead of native delegation.\n' >> "$folder/SKILL.md"
+  ln -s "$root/scripts/lib" "$folder/scripts/lib"
+  if [[ $name == scout ]]; then command_name=scout
+  elif [[ $name == bulk-reader ]]; then command_name=bulk-read; else command_name=code-write; fi
+  {
+    # Keep expansions literal for the installed launcher.
+    # shellcheck disable=SC2016
+    printf '%s\n' '#!/usr/bin/env bash' 'set -o pipefail'
+    if [[ $name == scout ]]; then
+      # shellcheck disable=SC2016
+      printf '%s\n' 'source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/scout.sh"'
+      printf 'shunt_scout --root %q --backend %q' "$project" "$backend"
+    else
+      # shellcheck disable=SC2016
+      printf '%s\n' 'source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/tasks.sh"'
+      printf 'shunt_main %q --backend %q' "$command_name" "$backend"
+    fi
+    if [[ -n $model ]]; then printf ' --model %q' "$model"; fi
+    printf ' "$@"\n'
+  } > "$folder/scripts/$command_name"
+  chmod +x "$folder/scripts/$command_name"
+  printf 'Installed %s\n' "$folder"
+done
+if ((install_hooks)); then
+  case $harness in
+    claude|codex)
+      hook_args=("$harness" --project "$project" --auto-scout --backend "$backend")
+      [[ -z $model ]] || hook_args+=(--model "$model")
+      "$root/scripts/install-hooks" "${hook_args[@]}" ;;
+    copilot) "$root/scripts/install-hooks" "$harness" --project "$project" ;;
+  esac
+fi
+trap - EXIT

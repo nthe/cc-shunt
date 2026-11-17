@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+set -euo pipefail
+# shellcheck source-path=SCRIPTDIR
+# shellcheck source=lib/tasks.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/tasks.sh"
+target='' overwrite=0
+while (($#)); do
+  case $1 in
+    --target)
+      (($# >= 2)) && [[ -n $2 && $2 != --* ]] || { shunt_error 'missing --target value'; exit 1; }
+      target=$2; shift 2 ;;
+    --overwrite) overwrite=1; shift ;;
+    *) shunt_error "unknown argument: $1"; exit 1 ;;
+  esac
+done
+[[ -n $target ]] || { shunt_error '--target is required'; exit 1; }
+shunt_target_check
+# This helper writes supplied code. It does not start a model.
+SHUNT_ACTIVE='' shunt_init
+cat > "$shunt_work/answer"
+shunt_files plain 1 0 "$shunt_work/answer" > /dev/null
+shunt_write
