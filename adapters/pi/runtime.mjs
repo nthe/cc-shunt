@@ -40,7 +40,7 @@ export function checkRead(config, cwd, tool, input) {
     cwd, encoding: "utf8", timeout: 10000,
     input: JSON.stringify({ tool_name: tool === "read" ? "Read" : "Bash", tool_input: input, cwd }),
   });
-  if (result.error || result.status !== 0) throw new Error("Shunt read check failed.");
+  if (result.error || result.status !== 0) throw new Error("Shunt read check failed. Check that jq is installed and the CC Shunt source path exists.");
   const output = result.stdout.trim();
   if (!output) return;
   const decision = JSON.parse(output).hookSpecificOutput;

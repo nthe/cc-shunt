@@ -21,75 +21,47 @@ Scout cost less in all 12 pairs. The median paired saving was 21.5%. Credits use
 
 ## Install
 
-Keep this folder in a stable path. Project installs link scripts and adapters to it. Use one install route per harness. Do not install the plugin and project files at the same time; that can add duplicate hooks or agents.
+Clone this repository to a stable path. Project installations link to its scripts. Keep the source folder in place. Install `jq`, `iconv`, and the CLI for your harness. Run the command for your harness from the project directory. Replace `/path/to/cc-shunt` with the clone path.
 
-### Codex: measured setup
+| Harness | One-command project installation |
+| --- | --- |
+| Codex | `/path/to/cc-shunt/scripts/install codex --project "$PWD"` |
+| Claude Code | `/path/to/cc-shunt/scripts/install claude --project "$PWD"` |
+| Copilot CLI | `/path/to/cc-shunt/scripts/install copilot --project "$PWD" --model MODEL` |
+| Pi | `/path/to/cc-shunt/scripts/install pi --project "$PWD" --model provider/model` |
+| OpenCode | `/path/to/cc-shunt/scripts/install opencode --project "$PWD" --model provider/model` |
 
-Run these commands from the project root. They add native agent files, a blocking read hook, and the `shunt_reader` MCP server.
+Codex defaults to `gpt-6-luna` and Claude Code to `haiku`. Use `--model MODEL` to select another available worker model. The Codex command installs the `shunt_reader` MCP server as well as native agents and the read hook. After installation, restart the harness. For Codex, review and trust the hook with `/hooks`. For Pi, trust the project and run `/reload`.
 
-```sh
-PRODUCT=/path/to/cc-shunt
-"$PRODUCT/scripts/install-native" codex --project "$PWD" --model gpt-6-luna
-"$PRODUCT/scripts/install-codex-mcp" --project "$PWD" --model gpt-6-luna
-```
+Rerun the same command with the same model and options to repair missing files. It does not overwrite conflicting or edited files. If it reports a conflict, inspect the named path and preserve any changes before you remove or rename it. Then rerun the command. Do not install the marketplace plugin and project files together. They can add duplicate agents or hooks.
 
-Restart Codex. Review and trust the hook with `/hooks`. The MCP server starts a separate Codex CLI worker. It uses the configured model and project root. Set `--model` to another model that Codex can use. To match the reported run, use `gpt-6.1-sol` at high effort for the parent and `gpt-6-luna` at high effort for the worker. The installer sets only the worker model.
+### Verify setup
 
-The Codex marketplace plugin supplies skills and the blocking hook. Use that route by itself. The measured setup above is a separate project install with native agent files and MCP setup.
+Run `/path/to/cc-shunt/scripts/doctor HARNESS --project "$PWD"` to check the project installation. Replace `HARNESS` with `codex`, `claude`, `copilot`, `pi`, or `opencode`. Static checks do not confirm that the harness loaded or trusted the hook, or that provider authentication and model access work. For Codex or Claude, add `--live` to run a small worker request. It uses the configured provider and can incur charges. For the other harnesses, follow the manual checks printed by the command.
 
-### Claude Code
+### Disable, update, and uninstall
 
-Use the plugin directly:
+Before editing configuration, back it up. Keep unrelated agents, skills, hooks, plugins, and MCP servers. Restart the harness after changes.
 
-```sh
-claude --plugin-dir /path/to/cc-shunt
-```
+- **Disable routing:** For Codex, Claude, or Copilot, remove only the hook entry that invokes `scripts/check-large-read.sh` from `.codex/hooks.json`, `.claude/settings.json`, or `.github/hooks/shunt.json`, respectively. For Pi, set `hooks` to `false` in `.pi/shunt.json`. For OpenCode, remove the CC Shunt link at `.opencode/plugins/shunt.js`. This stops recognized broad-read blocking; installed agents remain available. `--no-hooks` selects no hook for a new install; do not rely on it to remove an existing hook.
+- **Update:** Update the source clone, then rerun the install command. Inspect any conflict before replacing a file. The project install copies skill and agent definitions and links scripts to the source; a source update alone does not refresh the copies. To change a model, inspect and update the installed agent definitions and, for Codex, `.codex/config.toml`; for Pi, update `.pi/shunt.json`. Run the verification command again.
+- **Uninstall:** First disable the hook as above. Remove the three CC Shunt skill folders `scout`, `bulk-reader`, and `code-writer` under the harness skill directory: `.agents/skills` for Codex, or `.claude/skills`, `.github/skills`, `.pi/skills`, or `.opencode/skills` for the other harnesses. Remove the matching agent files under `.codex/agents`, `.claude/agents`, `.github/agents`, or `.opencode/agents`. For Pi, remove the CC Shunt `.pi/extensions/shunt` link and `.pi/shunt.json`. For Codex, also remove only the `[mcp_servers.shunt_reader]` section from `.codex/config.toml`. Inspect ownership before deleting any file; do not delete an unrelated file with the same name. Remove the source clone only after its installed links are removed.
 
-Or add the marketplace in Claude Code:
+These steps apply to project installations. For a marketplace or plugin installation, use that harness's plugin manager to disable or remove `cc-shunt` instead.
 
-```text
-/plugin marketplace add /path/to/cc-shunt
-/plugin install cc-shunt@shunt-tools
-```
+## Harness capabilities
 
-The plugin includes native Scout, bulk-reader, and code-writer agents. Scout uses Haiku by default. For a project-scoped install with another worker model, use `scripts/install-native claude --project DIR --model MODEL` instead of the plugin.
+The hook blocks recognized broad reads. Its coverage is limited; shell pipes and some commands can pass through. It is not a security boundary. A blocked read does not itself guarantee that the parent delegates.
 
-### GitHub Copilot
+| Harness | Routing and worker | Waiting and visible status |
+| --- | --- | --- |
+| Codex | Read hook, native Scout, and `shunt_reader` MCP | MCP call waits for its final answer. Live MCP progress display is not established. Review and trust the hook. |
+| Claude Code | Read hook and native Scout | Native agent visibility and waiting depend on the harness. Custom per-worker cost display is not established. |
+| Copilot CLI | Read hook and native Scout | Native agent visibility and waiting depend on the harness. Live per-worker cost display is not established. |
+| Pi | Read hook and isolated Pi worker tool | The tool waits for its worker. The extension displays status, model, token use, and reported cost when available. |
+| OpenCode | Read hook plugin and native Scout | Native agent behavior varies by version. [Current OpenCode documentation](https://opencode.ai/docs/agents/) describes background subagents. Do not assume the parent is blocked. |
 
-The package uses the Agent Plugins format. Add the local marketplace in Copilot CLI:
-
-```sh
-copilot plugin marketplace add /path/to/cc-shunt
-copilot plugin install cc-shunt@shunt-tools
-```
-
-The same package format can be installed from the VS Code Plugins view. For a project-scoped install with an explicit worker model, run this instead of the marketplace install:
-
-```sh
-/path/to/cc-shunt/scripts/install-native copilot --project "$PWD" --model MODEL
-```
-
-`MODEL` must be available in Copilot. Check the selected model in the harness.
-
-### Pi
-
-For a project install, run:
-
-```sh
-/path/to/cc-shunt/scripts/install-native pi --project "$PWD" --model provider/model
-```
-
-This links the extension into `.pi/extensions`. Trust the project and run `/reload`. The extension adds `shunt_scout`, `shunt_bulk_reader`, and `shunt_code_writer` tools. To use the package through Pi's package manager after publishing it to npm or Git, add its source with `pi install` and set `SHUNT_PI_MODEL` to a supported `provider/model`.
-
-### OpenCode
-
-Run:
-
-```sh
-/path/to/cc-shunt/scripts/install-native opencode --project "$PWD" --model provider/model
-```
-
-This installs native child-agent definitions and links the plugin. OpenCode also supports local plugins and npm packages. The package can be added to `opencode.json` after it is published to npm.
+For blocking behavior, use a route that waits for the final result. Verify the behavior in the installed harness and version. Worker cost depends on provider usage and is not necessarily an invoice amount.
 
 ## How it works
 

@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+set -euo pipefail
+root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
+usage() { printf '%s\n' 'doctor claude|codex|copilot|pi|opencode [--project DIR] [--live]'; }
+fail() { printf 'Error: %s\n' "$*" >&2; exit 1; }
+[[ ${1:-} != --help && ${1:-} != -h ]] || { usage; exit 0; }
+harness=${1:-}
+[[ -n $harness ]] || { usage >&2; exit 1; }
+shift
+project=$PWD live=0
+while (($#)); do
+  case $1 in
+    --project) (($# >= 2)) && [[ -n $2 && $2 != --* ]] || fail 'Supply a project path after --project.'; project=$2; shift 2 ;;
+    --live) live=1; shift ;;
+    *) fail "Unknown option: $1" ;;
+  esac
+done
+case $harness in claude|codex|copilot|pi|opencode) ;; *) fail "Unsupported harness: $harness" ;; esac
+[[ -d $project ]] || fail "Project folder does not exist: $project"
+project=$(cd "$project" && pwd -P)
+for cmd in jq iconv "$harness"; do command -v "$cmd" >/dev/null 2>&1 || fail "Install $cmd and make it available in PATH."; done
+case $harness in
+  codex) agent=$project/.codex/agents/scout.toml; hook=$project/.codex/hooks.json; event=PreToolUse ;;
+  claude) agent=$project/.claude/agents/scout.md; hook=$project/.claude/settings.json; event=PreToolUse ;;
+  copilot) agent=$project/.github/agents/scout.agent.md; hook=$project/.github/hooks/shunt.json; event=preToolUse ;;
+  opencode) agent=$project/.opencode/agents/scout.md; hook=$project/.opencode/plugins/shunt.js ;;
+  pi) agent=$project/.pi/shunt.json; hook=$project/.pi/extensions/shunt ;;
+esac
+[[ -f $agent ]] || fail "Scout configuration is missing: $agent. Run scripts/install $harness --project '$project'."
+if [[ $harness == pi ]]; then
+  model=${SHUNT_PI_MODEL:-$(jq -er '.model | select(type == "string" and length > 0)' "$agent" 2>/dev/null || :)}
+  jq -e '.hooks != false' "$agent" >/dev/null || fail 'Pi hook is disabled. Enable hooks in .pi/shunt.json.'
+elif [[ $harness == codex ]]; then
+  model=$(sed -n 's/^model = //p' "$agent" | head -n 1 | jq -er 'select(type == "string" and length > 0)' 2>/dev/null || :)
+else
+  model=$(sed -n 's/^model: //p' "$agent" | head -n 1 | jq -er 'select(type == "string" and length > 0)' 2>/dev/null || :)
+fi
+[[ -n $model ]] || fail "Worker model is missing or invalid in $agent. Configure a supported model."
+if [[ $harness == pi || $harness == opencode ]]; then
+  [[ -e $hook ]] || fail "Hook adapter is missing or its link is broken: $hook. Run scripts/install $harness --project '$project'."
+  if [[ $harness == pi ]]; then expected=$root/adapters/pi; else expected=$root/adapters/opencode/shunt.js; fi
+  [[ $hook -ef $expected ]] || fail "Hook adapter points to a different installation: $hook. Repair the installation."
+else
+  [[ -f $hook ]] || fail "Hook configuration is missing: $hook. Run scripts/install $harness --project '$project'."
+  printf -v hook_command 'bash %q %q' "$root/scripts/check-large-read.sh" "$harness"
+  jq -e --arg event "$event" --arg script "$hook_command" \
+    '.hooks[$event] | arrays | any(.. | strings; contains($script))' "$hook" >/dev/null 2>&1 || fail "The CC Shunt hook is not configured in $hook. Run scripts/install $harness --project '$project'."
+fi
+if [[ $harness == codex ]]; then
+  config=$project/.codex/config.toml
+  [[ -f $config ]] && grep -q '^\[mcp_servers\.shunt_reader\]' "$config" && grep -Fq "$root/scripts/mcp-reader" "$config" || fail "The Shunt MCP server is missing from $config. Run scripts/install codex --project '$project'."
+fi
+# Test the routing script directly; this cannot prove the harness loaded or trusted it.
+work=$(mktemp -d "${TMPDIR:-/tmp}/cc-shunt-doctor.XXXXXXXX")
+trap 'rm -rf -- "$work"' EXIT
+awk 'BEGIN { for (i=1; i<=121; i++) print "line" }' > "$work/large.txt"
+payload=$(jq -n --arg path "$work/large.txt" '{tool_name:"Read",tool_input:{file_path:$path}}')
+format=$harness
+[[ $format != pi && $format != opencode ]] || format=claude
+output=$(printf '%s' "$payload" | SHUNT_MIN_LINES=120 SHUNT_SECTION_LINES=120 bash "$root/scripts/check-large-read.sh" "$format") || fail 'The hook check failed. Verify jq and the CC Shunt source path.'
+printf '%s' "$output" | jq -e '(.hookSpecificOutput.permissionDecision // .permissionDecision) == "deny"' >/dev/null || fail 'The hook did not block a sample broad read. Check the CC Shunt installation.'
+printf 'PASS: %s installed. Worker model configured: %s. Hook blocks a sample read.\n' "$harness" "$model"
+printf '%s\n' 'Not verified: harness loaded or trusted the hook; model access; worker response.'
+if ((live)); then
+  case $harness in
+    codex|claude)
+      printf '%s\n' 'Running one live worker request. This can consume tokens and incur cost.'
+      if ! "$root/scripts/scout" --root "$project" --task 'Report the project folder name and cite the source used.' --paths . --backend "$harness" --model "$model" > "$work/answer"; then
+        fail "Worker request failed. Check $harness login, model access, and network, then retry."
+      fi
+      printf '%s\n' 'PASS: CLI worker returned a live response. This does not check harness integration. Check the answer and citations:'
+      cat "$work/answer" ;;
+    *) fail "Live checking is not supported for $harness. Restart the harness, trust the hook if prompted, and ask Scout to read a project file." ;;
+  esac
+else
+  printf '%s\n' 'For Codex or Claude, add --live to run a paid worker request. For other harnesses, verify Scout in the harness.'
+fi

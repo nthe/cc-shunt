@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+set -euo pipefail
+root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
+fail() { printf 'Error: %s\n' "$*" >&2; exit 1; }
+usage() { printf '%s\n' 'install claude|codex|copilot|pi|opencode [--project DIR] [--model ID] [--no-hooks]'; }
+if [[ ${1:-} == --help || ${1:-} == -h ]]; then usage; exit 0; fi
+harness=${1:-}
+(($#)) || { usage >&2; exit 1; }
+shift
+project=$PWD model='' hooks=1
+while (($#)); do
+  case $1 in
+    --project|--model)
+      (($# >= 2)) && [[ -n $2 && $2 != --* ]] || fail "Missing value for $1."
+      case $1 in --project) project=$2 ;; --model) model=$2 ;; esac
+      shift 2 ;;
+    --no-hooks) hooks=0; shift ;;
+    *) fail "Unknown argument: $1." ;;
+  esac
+done
+case $harness in
+  claude) model=${model:-haiku} ;;
+  codex) model=${model:-gpt-6-luna} ;;
+  copilot|pi|opencode) [[ -n $model ]] || fail "Add --model with a model available in $harness." ;;
+  *) fail "Unknown harness: $harness. Run scripts/install --help." ;;
+esac
+for command in jq iconv "$harness"; do
+  command -v "$command" >/dev/null 2>&1 || fail "Install $command and add it to PATH, then retry."
+done
+[[ -d $project ]] || fail "Project directory does not exist: $project"
+project=$(cd "$project" && pwd -P)
+stage=$(mktemp -d "${TMPDIR:-/tmp}/cc-shunt-install.XXXXXXXX")
+trap 'rm -rf -- "$stage"' EXIT
+"$root/scripts/install-native" "$harness" --project "$stage" --model "$model" --no-hooks >/dev/null
+if ((hooks)) && [[ $harness == pi ]]; then
+  tmp=$stage/.pi/shunt.json.tmp
+  jq '.hooks = true' "$stage/.pi/shunt.json" > "$tmp"
+  mv "$tmp" "$stage/.pi/shunt.json"
+elif ((hooks)) && [[ $harness == opencode ]]; then
+  mkdir -p "$stage/.opencode/plugins"
+  ln -s "$root/adapters/opencode/shunt.js" "$stage/.opencode/plugins/shunt.js"
+fi
+# Check all generated paths before changing project files. Existing matching
+# files are kept; changed or unrelated files require a manual decision.
+while IFS= read -r -d '' source; do
+  relative=${source#"$stage"/}
+  target=$project/$relative
+  parent=$(dirname "$target")
+  while [[ $parent != "$project" ]]; do
+    [[ ! -L $parent ]] || fail "Installation directory is a symbolic link: $parent."
+    parent=$(dirname "$parent")
+  done
+  if [[ -L $source ]]; then
+    if [[ -e $target || -L $target ]]; then
+      [[ -L $target && $(readlink "$target") == "$(readlink "$source")" ]] || fail "Conflicting file: $target. Preserve or remove it, then retry."
+    fi
+  elif [[ -e $target || -L $target ]]; then
+    [[ -f $target && ! -L $target ]] && cmp -s "$source" "$target" || fail "Conflicting file: $target. Preserve or remove it, then retry."
+  fi
+done < <(find "$stage" \( -type f -o -type l \) -print0)
+# Install the MCP configuration first. It is safe to retry if later steps fail.
+if [[ $harness == codex ]]; then
+  "$root/scripts/install-codex-mcp" --project "$project" --model "$model"
+fi
+while IFS= read -r -d '' source; do
+  relative=${source#"$stage"/}
+  target=$project/$relative
+  [[ ! -e $target && ! -L $target ]] || continue
+  mkdir -p "$(dirname "$target")"
+  if [[ -L $source ]]; then ln -s "$(readlink "$source")" "$target"; else cp "$source" "$target"; fi
+done < <(find "$stage" \( -type f -o -type l \) -print0)
+if ((hooks)); then
+  case $harness in claude|codex|copilot) "$root/scripts/install-hooks" "$harness" --project "$project" ;; esac
+fi
+printf 'CC Shunt installed for %s in %s (model: %s).\n' "$harness" "$project" "$model"
+printf '%s\n' 'Restart the harness. Keep the CC Shunt source folder in place.'

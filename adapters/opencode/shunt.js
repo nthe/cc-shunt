@@ -11,7 +11,7 @@ function checkRead(payload, cwd) {
     const child = execFile("bash", [hook, "claude"], {
       cwd, encoding: "utf8", timeout: 10000, maxBuffer: 65536,
     }, (error, stdout) => {
-      if (error) return reject(new Error("Shunt read check failed."));
+      if (error) return reject(new Error("Shunt read check failed. Check that jq is installed and the CC Shunt source path exists."));
       try {
         resolve(stdout.trim() ? JSON.parse(stdout).hookSpecificOutput?.permissionDecisionReason : undefined);
       } catch {

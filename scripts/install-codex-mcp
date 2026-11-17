@@ -20,12 +20,18 @@ mkdir -p "$project/.codex"
 file=$project/.codex/config.toml
 [[ ! -L $file ]] || fail 'Codex config is a symbolic link'
 [[ ! -e $file || -f $file ]] || fail 'Codex config is not a regular file'
-if [[ -e $file ]] && grep -Fq 'shunt_reader' "$file"; then
-  fail 'shunt_reader already exists in Codex config'
-fi
 command -v jq >/dev/null 2>&1 || fail 'jq is required'
 args=$(jq -cn --arg script "$root/scripts/mcp-reader" --arg project "$project" --arg model "$model" \
   '[$script,"--root",$project,"--backend","codex","--model",$model]')
+expected=$(printf '%s\n' '[mcp_servers.shunt_reader]' 'command = "bash"' "args = $args" 'required = true' 'tool_timeout_sec = 240')
+if [[ -e $file ]] && grep -Fq 'shunt_reader' "$file"; then
+  existing=$(awk '/^\[mcp_servers\.shunt_reader\]$/ { found=1; print; next } found && /^\[/ { exit } found && NF { print }' "$file")
+  if [[ $existing == "$expected" ]]; then
+    printf 'CC Shunt MCP configuration already exists in %s.\n' "$file"
+    exit 0
+  fi
+  fail 'shunt_reader already exists with different settings. Review the Codex config before retrying.'
+fi
 tmp=$(mktemp "$project/.codex/.shunt-config.XXXXXXXX")
 cleanup() { rm -f -- "$tmp"; }
 trap cleanup EXIT

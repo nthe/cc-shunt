@@ -103,7 +103,7 @@ shunt_invoke() {
     esac
   fi
   command -v "${SHUNT_CMD[0]}" >/dev/null 2>&1 || {
-    shunt_error "worker command not found: ${SHUNT_CMD[0]}"; return 1;
+    shunt_error "worker command not found: ${SHUNT_CMD[0]}; install it and check PATH"; return 1;
   }
   # Job control gives each background job a process group on macOS and Linux.
   set -m
@@ -130,10 +130,10 @@ shunt_invoke() {
   kill -KILL -- "-$shunt_worker" 2>/dev/null || :
   shunt_worker=
   if [[ -e $shunt_work/timed-out ]]; then
-    shunt_error "worker stopped; time limit is $shunt_timeout seconds"; return 1
+    shunt_error "worker stopped; time limit is $shunt_timeout seconds. Check network and model access, or increase SHUNT_TIMEOUT_SECONDS"; return 1
   fi
   if ((rc)); then
-    shunt_error "worker failed ($rc)"
+    shunt_error "worker failed ($rc); check the error below, login, model access, and network"
     tail -c 2000 "$shunt_work/stderr" >&2
     return 1
   fi
@@ -142,11 +142,11 @@ shunt_invoke() {
       jq -er 'if type == "object" and (.is_error != true) and (.result | type == "string")
               then .result else error("worker returned an error or invalid response") end' \
         "$shunt_work/stdout" > "$shunt_work/answer" || {
-          shunt_error 'Claude returned an error or invalid response'; return 1;
+          shunt_error 'Claude returned an error or invalid response; check Claude login and model access'; return 1;
         } ;;
     command) cp "$shunt_work/stdout" "$shunt_work/answer" || return 1 ;;
   esac
   if [[ ! -f $shunt_work/answer ]] || ! LC_ALL=C grep -q '[^[:space:]]' "$shunt_work/answer"; then
-    shunt_error 'worker returned no text'; return 1
+    shunt_error 'worker returned no text; check model access and retry'; return 1
   fi
 }
